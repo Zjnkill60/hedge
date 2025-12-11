@@ -199,20 +199,22 @@ class OrderBook:
 
 class LighterWebSocketClient:
     """Client WebSocket chuẩn cho Lighter (giống 100% Web UI)"""
+
     def __init__(self, market_index: int = 0):
         self.market_index = market_index
         self.orderbook = OrderBook("Lighter")
         self.ws_url = "wss://mainnet.zklighter.elliot.ai/stream"
         self.snapshot_url = f"https://mainnet.zklighter.elliot.ai/depth/{market_index}"
 
-        self.bids = {}   # price -> size
+        self.bids = {}  # price -> size
         self.asks = {}
+
         self.ws = None
-        self.running = False
         self.thread = None
+        self.running = False
 
     # -----------------------------------------------------------------
-    # FETCH SNAPSHOT BAN ĐẦU (bắt buộc)
+    # LOAD SNAPSHOT
     # -----------------------------------------------------------------
     def load_snapshot(self):
         try:
@@ -220,52 +222,75 @@ class LighterWebSocketClient:
             r = requests.get(self.snapshot_url, timeout=3)
             data = r.json()
 
+            # RESET trước khi load
+            self.bids.clear()
+            self.asks.clear()
+
             self.bids = {float(p): float(s) for p, s in data.get("bids", [])}
             self.asks = {float(p): float(s) for p, s in data.get("asks", [])}
 
-            # Update orderbook storage
             bids_list = [[str(p), str(s)] for p, s in self.bids.items()]
             asks_list = [[str(p), str(s)] for p, s in self.asks.items()]
             self.orderbook.update(bids_list, asks_list)
 
             print("[Lighter] Snapshot loaded OK")
-
         except Exception as e:
             print("[Lighter] Snapshot ERROR:", e)
 
     # -----------------------------------------------------------------
-    # START WS
+    # START CLIENT
     # -----------------------------------------------------------------
     def start(self):
         self.running = True
-        self.load_snapshot()      # *** MUST DO BEFORE WS ***
-        self.thread = threading.Thread(target=self._run_websocket, daemon=True)
+        self.load_snapshot()
+
+        self.thread = threading.Thread(target=self._ws_loop, daemon=True)
         self.thread.start()
 
-    def _run_websocket(self):
-        self.ws = websocket.WebSocketApp(
-            self.ws_url,
-            on_open=self._on_open,
-            on_message=self._on_message,
-            on_error=self._on_error,
-            on_close=self._on_close
-        )
-        self.ws.run_forever()
+    # -----------------------------------------------------------------
+    # WS LOOP (auto reconnect)
+    # -----------------------------------------------------------------
+    def _ws_loop(self):
+        while self.running:
+            try:
+                self.ws = websocket.WebSocketApp(
+                    self.ws_url,
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                )
+
+                # RẤT QUAN TRỌNG → Lighter cần ping
+                self.ws.run_forever(
+                    ping_interval=15,
+                    ping_timeout=5,
+                    reconnect=5
+                )
+
+            except Exception as e:
+                print("[Lighter] WS fatal error:", e)
+
+            print("[Lighter] Retry connection in 3s...")
+            time.sleep(3)
 
     # -----------------------------------------------------------------
-    # WS HANDLERS
+    # HANDLERS
     # -----------------------------------------------------------------
     def _on_open(self, ws):
-        print(f"[Lighter] Connected WS")
-        ws.send(json.dumps({
+        print("[Lighter] Connected WS")
+        subscribe_msg = {
             "type": "subscribe",
             "channel": f"order_book/{self.market_index}"
-        }))
+        }
+        try:
+            ws.send(json.dumps(subscribe_msg))
+        except:
+            pass
 
     def _on_message(self, ws, message):
         try:
             msg = json.loads(message)
-
             if msg.get("type") != "update/order_book":
                 return
 
@@ -273,52 +298,49 @@ class LighterWebSocketClient:
             if not ob:
                 return
 
-            # --- APPLY DELTAS ---
-            # Asks delta
+            # APPLY DELTAS
             for level in ob.get("asks", []):
-                price = float(level["price"])
-                size = float(level["size"])
-                if size <= 0:
-                    self.asks.pop(price, None)
+                p = float(level["price"])
+                s = float(level["size"])
+                if s <= 0:
+                    self.asks.pop(p, None)
                 else:
-                    self.asks[price] = size
+                    self.asks[p] = s
 
-            # Bids delta
             for level in ob.get("bids", []):
-                price = float(level["price"])
-                size = float(level["size"])
-                if size <= 0:
-                    self.bids.pop(price, None)
+                p = float(level["price"])
+                s = float(level["size"])
+                if s <= 0:
+                    self.bids.pop(p, None)
                 else:
-                    self.bids[price] = size
+                    self.bids[p] = s
 
-            # --- APPLY TO ORDERBOOK OBJECT ---
+            # SORT & UPDATE
             bids_sorted = sorted(self.bids.items(), key=lambda x: -x[0])
             asks_sorted = sorted(self.asks.items(), key=lambda x: x[0])
 
-            bids_list = [[str(p), str(s)] for p, s in bids_sorted]
-            asks_list = [[str(p), str(s)] for p, s in asks_sorted]
-
-            self.orderbook.update(bids_list, asks_list)
+            self.orderbook.update(
+                [[str(p), str(s)] for p, s in bids_sorted],
+                [[str(p), str(s)] for p, s in asks_sorted]
+            )
 
         except Exception as e:
             print("[Lighter] Parse error:", e)
 
-    # -----------------------------------------------------------------
     def _on_error(self, ws, error):
         print("[Lighter] WS error:", error)
 
     def _on_close(self, ws, status, msg):
-        print("[Lighter] WS closed:", status, msg)
-        if self.running:
-            time.sleep(3)
-            self._run_websocket()
+        print(f"[Lighter] WS closed {status}: {msg}")
 
+    # -----------------------------------------------------------------
     def stop(self):
         self.running = False
         if self.ws:
-            self.ws.close()
-
+            try:
+                self.ws.close()
+            except:
+                pass
 
 class MEXCWebSocketClient:
     """Client WebSocket chuẩn nhất cho MEXC Depth"""
@@ -771,4 +793,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
+
         print("\n👋 Goodbye!")
