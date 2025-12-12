@@ -198,149 +198,257 @@ class OrderBook:
 
 
 class LighterWebSocketClient:
-    """Client WebSocket chuẩn cho Lighter (giống 100% Web UI)"""
+    """
+    FINAL Lighter WebSocket client:
+    - subscribe + request snapshot via WS (no REST snapshot)
+    - apply full snapshot messages and delta updates
+    - auto reconnect loop (single thread)
+    - watchdog: if no messages for `stale_timeout` seconds -> force reconnect
+    - clears orderbook before snapshot
+    - thread-safe minimal state
+    """
 
-    def __init__(self, market_index: int = 0):
+    def __init__(self, market_index: int = 0,
+                 ws_url: str = "wss://mainnet.zklighter.elliot.ai/stream",
+                 stale_timeout: float = 2.0,
+                 reconnect_delay: float = 2.0):
         self.market_index = market_index
-        self.orderbook = OrderBook("Lighter")
-        self.ws_url = "wss://mainnet.zklighter.elliot.ai/stream"
-        self.snapshot_url = f"https://mainnet.zklighter.elliot.ai/depth/{market_index}"
+        self.ws_url = ws_url
 
-        self.bids = {}  # price -> size
+        # orderbook container (expects your OrderBook class signature)
+        self.orderbook = OrderBook("Lighter")
+
+        # local maps for merging
+        self.bids = {}   # price(float) -> size(float)
         self.asks = {}
 
-        self.ws = None
-        self.thread = None
+        # threading & control
+        self._ws = None
+        self._thread = None
+        self._watchdog_thread = None
         self.running = False
 
-    # -----------------------------------------------------------------
-    # LOAD SNAPSHOT
-    # -----------------------------------------------------------------
-    def load_snapshot(self):
-        try:
-            import requests
-            r = requests.get(self.snapshot_url, timeout=3)
-            data = r.json()
+        # snapshot synchronization (wait until first snapshot applied)
+        self._snapshot_event = threading.Event()
 
-            # RESET trước khi load
-            self.bids.clear()
-            self.asks.clear()
+        # last message timestamp (for watchdog)
+        self._last_msg_ts = 0.0
+        self.stale_timeout = stale_timeout
+        self.reconnect_delay = reconnect_delay
 
-            self.bids = {float(p): float(s) for p, s in data.get("bids", [])}
-            self.asks = {float(p): float(s) for p, s in data.get("asks", [])}
+        # lock for bids/asks updates (simple)
+        self._lock = threading.Lock()
 
-            bids_list = [[str(p), str(s)] for p, s in self.bids.items()]
-            asks_list = [[str(p), str(s)] for p, s in self.asks.items()]
-            self.orderbook.update(bids_list, asks_list)
-
-            print("[Lighter] Snapshot loaded OK")
-        except Exception as e:
-            print("[Lighter] Snapshot ERROR:", e)
-
-    # -----------------------------------------------------------------
-    # START CLIENT
-    # -----------------------------------------------------------------
+    # ---------- public API ----------
     def start(self):
+        """Start ws loop + watchdog thread."""
+        if self.running:
+            return
         self.running = True
-        self.load_snapshot()
+        self._thread = threading.Thread(target=self._ws_loop, daemon=True)
+        self._thread.start()
+        self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
+        self._watchdog_thread.start()
+        print("[Lighter] client started")
 
-        self.thread = threading.Thread(target=self._ws_loop, daemon=True)
-        self.thread.start()
+    def stop(self):
+        """Stop everything and close ws."""
+        self.running = False
+        try:
+            if self._ws:
+                self._ws.close()
+        except Exception:
+            pass
+        # set event so any waiters don't hang
+        self._snapshot_event.set()
+        print("[Lighter] client stopped")
 
-    # -----------------------------------------------------------------
-    # WS LOOP (auto reconnect)
-    # -----------------------------------------------------------------
+    # ---------- internal loop ----------
     def _ws_loop(self):
         while self.running:
             try:
-                self.ws = websocket.WebSocketApp(
+                # Build new WebSocketApp every attempt (no reuse)
+                self._snapshot_event.clear()
+                self._ws = websocket.WebSocketApp(
                     self.ws_url,
                     on_open=self._on_open,
                     on_message=self._on_message,
                     on_error=self._on_error,
-                    on_close=self._on_close,
+                    on_close=self._on_close
                 )
 
-                # RẤT QUAN TRỌNG → Lighter cần ping
-                self.ws.run_forever(
-                    ping_interval=15,
-                    ping_timeout=5,
-                    reconnect=5
-                )
-
+                # run_forever will block until closed/exception
+                # Note: do NOT set ping_interval/ping_timeout if server's ping/pong is flaky.
+                # If Lighter supports ping/pong reliably you can pass them here.
+                self._ws.run_forever()
             except Exception as e:
-                print("[Lighter] WS fatal error:", e)
+                print("[Lighter] WS run_forever exception:", e)
 
-            print("[Lighter] Retry connection in 3s...")
-            time.sleep(3)
+            if not self.running:
+                break
 
-    # -----------------------------------------------------------------
-    # HANDLERS
-    # -----------------------------------------------------------------
+            print(f"[Lighter] WS loop exit — reconnecting in {self.reconnect_delay}s")
+            time.sleep(self.reconnect_delay)
+
+    # ---------- watchdog ----------
+    def _watchdog_loop(self):
+        """If no message received for stale_timeout -> force reconnect."""
+        while self.running:
+            now = time.time()
+            last = self._last_msg_ts
+            if last and (now - last) > self.stale_timeout:
+                print("[Lighter] Watchdog: no messages for", round(now - last, 3),
+                      "s -> forcing reconnect")
+                # force close; ws.run_forever will return and loop will reconnect
+                try:
+                    if self._ws:
+                        self._ws.close()
+                except Exception:
+                    pass
+                # wait a bit for reconnect loop to handle
+                time.sleep(self.reconnect_delay)
+                # reset last msg time to avoid continuous closes
+                self._last_msg_ts = time.time()
+            time.sleep(0.25)
+
+    # ---------- WS callbacks ----------
     def _on_open(self, ws):
-        print("[Lighter] Connected WS")
-        subscribe_msg = {
-            "type": "subscribe",
-            "channel": f"order_book/{self.market_index}"
-        }
+        print("[Lighter] Connected WS — subscribe + request snapshot")
+        # Clear local state BEFORE requesting snapshot
+        with self._lock:
+            self.bids.clear()
+            self.asks.clear()
+            # push an empty orderbook to avoid stale view (optional)
+            self.orderbook.update([], [])
+
+        # Subscribe channel
         try:
+            subscribe_msg = {
+                "type": "subscribe",
+                "channel": f"order_book/{self.market_index}"
+            }
             ws.send(json.dumps(subscribe_msg))
-        except:
-            pass
+        except Exception as e:
+            print("[Lighter] subscribe send error:", e)
+
+        # Small pause then explicitly request snapshot via WS (important)
+        try:
+            time.sleep(0.05)
+            snapshot_req = {
+                "type": "get_snapshot",
+                "channel": f"order_book/{self.market_index}"
+            }
+            ws.send(json.dumps(snapshot_req))
+            # we will wait for 'snapshot/order_book' message
+            # but don't block here; snapshot_event used elsewhere if needed
+        except Exception as e:
+            print("[Lighter] snapshot request send error:", e)
 
     def _on_message(self, ws, message):
+        now = time.time()
+        self._last_msg_ts = now
+
         try:
             msg = json.loads(message)
-            if msg.get("type") != "update/order_book":
-                return
-
-            ob = msg.get("order_book", {})
-            if not ob:
-                return
-
-            # APPLY DELTAS
-            for level in ob.get("asks", []):
-                p = float(level["price"])
-                s = float(level["size"])
-                if s <= 0:
-                    self.asks.pop(p, None)
-                else:
-                    self.asks[p] = s
-
-            for level in ob.get("bids", []):
-                p = float(level["price"])
-                s = float(level["size"])
-                if s <= 0:
-                    self.bids.pop(p, None)
-                else:
-                    self.bids[p] = s
-
-            # SORT & UPDATE
-            bids_sorted = sorted(self.bids.items(), key=lambda x: -x[0])
-            asks_sorted = sorted(self.asks.items(), key=lambda x: x[0])
-
-            self.orderbook.update(
-                [[str(p), str(s)] for p, s in bids_sorted],
-                [[str(p), str(s)] for p, s in asks_sorted]
-            )
-
         except Exception as e:
-            print("[Lighter] Parse error:", e)
+            print("[Lighter] Parse error (invalid json):", e)
+            return
+
+        # ---------- full snapshot message ----------
+        msg_type = msg.get("type")
+        if msg_type == "snapshot/order_book":
+            ob = msg.get("order_book") or {}
+            self._apply_full_snapshot(ob)
+            self._snapshot_event.set()
+            return
+
+        # ---------- delta update message ----------
+        if msg_type == "update/order_book":
+            ob = msg.get("order_book") or {}
+            self._apply_deltas(ob)
+            return
+
+        # other messages (heartbeat/ack) can be ignored
+        # update last_msg_ts to keep watchdog happy for non-orderbook messages too
+        # self._last_msg_ts updated above
 
     def _on_error(self, ws, error):
         print("[Lighter] WS error:", error)
 
     def _on_close(self, ws, status, msg):
-        print(f"[Lighter] WS closed {status}: {msg}")
+        print(f"[Lighter] WS closed: {status} {msg}")
 
-    # -----------------------------------------------------------------
-    def stop(self):
-        self.running = False
-        if self.ws:
+    # ---------- helpers to apply data ----------
+    def _apply_full_snapshot(self, ob: dict):
+        """Replace local bids/asks with full snapshot"""
+        with self._lock:
             try:
-                self.ws.close()
-            except:
-                pass
+                self.bids.clear()
+                self.asks.clear()
+                for lvl in ob.get("bids", []):
+                    p = float(lvl.get("price", 0))
+                    s = float(lvl.get("size", 0))
+                    if s > 0:
+                        self.bids[p] = s
+                for lvl in ob.get("asks", []):
+                    p = float(lvl.get("price", 0))
+                    s = float(lvl.get("size", 0))
+                    if s > 0:
+                        self.asks[p] = s
+
+                self._push_to_orderbook()
+                # debug print minimal
+                print("[Lighter] applied full snapshot — levels:", len(self.bids), len(self.asks))
+            except Exception as e:
+                print("[Lighter] apply_full_snapshot error:", e)
+
+    def _apply_deltas(self, ob: dict):
+        """Apply incremental changes (asks/bids arrays)"""
+        with self._lock:
+            try:
+                for lvl in ob.get("asks", []):
+                    p = float(lvl.get("price", 0))
+                    s = float(lvl.get("size", 0))
+                    if s <= 0:
+                        self.asks.pop(p, None)
+                    else:
+                        self.asks[p] = s
+
+                for lvl in ob.get("bids", []):
+                    p = float(lvl.get("price", 0))
+                    s = float(lvl.get("size", 0))
+                    if s <= 0:
+                        self.bids.pop(p, None)
+                    else:
+                        self.bids[p] = s
+
+                self._push_to_orderbook()
+            except Exception as e:
+                print("[Lighter] apply_deltas error:", e)
+
+    def _push_to_orderbook(self):
+        """Convert local maps to OrderBook.update format and push"""
+        # create sorted arrays
+        bids_sorted = sorted(self.bids.items(), key=lambda x: -x[0])
+        asks_sorted = sorted(self.asks.items(), key=lambda x: x[0])
+
+        bids_list = [[str(p), str(s)] for p, s in bids_sorted]
+        asks_list = [[str(p), str(s)] for p, s in asks_sorted]
+
+        try:
+            self.orderbook.update(bids_list, asks_list)
+        except Exception as e:
+            # protect against OrderBook.Update errors
+            print("[Lighter] orderbook.update error:", e)
+
+    # ---------- optional blocking helper ----------
+    def wait_snapshot(self, timeout: float = 5.0) -> bool:
+        """
+        Wait until a full snapshot has been received and applied.
+        Returns True if snapshot arrived within timeout, False otherwise.
+        """
+        return self._snapshot_event.wait(timeout=timeout)
+
 
 class MEXCWebSocketClient:
     """Client WebSocket chuẩn nhất cho MEXC Depth"""
@@ -795,4 +903,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         print("\n👋 Goodbye!")
+
 
