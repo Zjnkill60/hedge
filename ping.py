@@ -4,7 +4,7 @@ So sánh orderbook realtime giữa 2 sàn để tìm cơ hội chênh lệch gi�
 
 Configuration: Sửa các thông tin bên dưới
 """
-
+import ssl
 import asyncio
 import json
 import websocket
@@ -19,15 +19,29 @@ import requests
 # ============================================================================
 # 📝 CONFIGURATION - SỬA Ở ĐÂY
 # ============================================================================
+IN_POSITION = False   
 
+# Chiều bạn đang vào lệnh
+# "L2M" = Buy Lighter → Sell MEXC
+# "M2L" = Buy MEXC → Sell Lighter
+CURRENT_DIRECTION = "L2M"
+
+# Spread lúc bạn vào lệnh (USD / 1 BTC)
+ENTRY_SPREAD_USD = 10
+
+# Khi spread co lại còn bao nhiêu thì báo
+REVERSAL_WARN_USD = -5.0
+
+# alert khi đảo chiều hoàn toàn
+REVERSAL_CONFIRM_USD = 2
 # Telegram Settings
 TELEGRAM_ENABLED = True  # True = bật Telegram, False = tắt
 TELEGRAM_BOT_TOKEN = "8410590021:AAEuXtNaXMk7-Su2oO20N_1l4-3KwZ_1H5g"  # Nhập Bot Token của bạn
 TELEGRAM_CHAT_IDS = ["1982844680", "1056814691", "5205147300"]   # Nhiều ID ở đây!
 
 # Alert Settings
-MIN_SPREAD_USD = 10.0    # Chênh lệch tối thiểu để gửi alert (USD)
-ALERT_COOLDOWN = 60      # Cooldown giữa các alert (giây)
+MIN_SPREAD_USD = 5    # Chênh lệch tối thiểu để gửi alert (USD)
+ALERT_COOLDOWN = 10      # Cooldown giữa các alert (giây)
 
 # Trading Settings
 MARKET_CHOICE = "BTC"    # "BTC" hoặc "ETH"
@@ -52,12 +66,17 @@ class TelegramNotifier:
             print("[Telegram] Warning: Không có chat_id hợp lệ!")
     
     async def send_message(self, message: str, parse_mode: str = "HTML"):
-        """Gửi message tới tất cả chat_id"""
         if not self.chat_ids:
             return False
-            
+
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+
         success_count = 0
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=connector) as session:
             for chat_id in self.chat_ids:
                 try:
                     payload = {
@@ -74,8 +93,9 @@ class TelegramNotifier:
                             print(f"[Telegram] Lỗi gửi tới {chat_id}: {resp.status} - {text}")
                 except Exception as e:
                     print(f"[Telegram] Exception khi gửi tới {chat_id}: {e}")
-        
+
         return success_count > 0
+
     
     def should_notify(self, direction: str) -> bool:
         now = datetime.now()
@@ -88,50 +108,74 @@ class TelegramNotifier:
         self.last_notification_time[direction] = datetime.now()
     
     async def send_arbitrage_alert(self, opportunity: Dict, trade_size: float, unit_name: str):
-        direction = opportunity['direction']
-        
+        direction = opportunity["direction"]
+
+        # Giữ nguyên logic cooldown / notify của bạn
         if not self.should_notify(direction):
             return False
-        
-        # ... (giữ nguyên phần tạo message như cũ)
-        spread = opportunity['profit_per_unit']
-        spread_pct = opportunity['spread_pct']
-        buy_price = opportunity['buy_price']
-        sell_price = opportunity['sell_price']
-        buy_exchange = opportunity['buy_exchange']
-        sell_exchange = opportunity['sell_exchange']
-        
-        if spread > 50:
-            emoji = "🚨💰🚨"
+
+        spread = opportunity["profit_per_unit"]
+        spread_pct = opportunity["spread_pct"]
+        buy_price = opportunity["buy_price"]
+        sell_price = opportunity["sell_price"]
+        buy_exchange = opportunity["buy_exchange"]
+        sell_exchange = opportunity["sell_exchange"]
+        total_profit = spread * trade_size
+
+        # =========================
+        # LEVEL + EMOJI (KHÔNG CHẶN GỬI)
+        # =========================
+        if spread >= 50:
+            icon = "💎"
             level = "RẤT LỚN"
-        elif spread > 20:
-            emoji = "🔥💵"
+        elif spread >= 20:
+            icon = "🔥"
             level = "LỚN"
-        elif spread > 10:
-            emoji = "✅💸"
-            level = "VỪA"
+        elif spread >= 10:
+            icon = "🟢"
+            level = "ENTRY OK"
         else:
-            emoji = "⚠️"
-            level = "NHỎ"
-        
-        message = f"""
-{emoji} <b>ARBITRAGE OPPORTUNITY - {level}</b> {emoji}
+            icon = "⚠️"
+            level = "SPREAD NHỎ"
 
-<b>🎯 Strategy:</b>
-• Buy {buy_exchange}: <code>${buy_price:,.2f}</code>
-• Sell {sell_exchange}: <code>${sell_price:,.2f}</code>
+        # =========================
+        # XÁC ĐỊNH CHIỀU CHUẨN (ĐỪNG CHECK STRING DÀI)
+        # =========================
+        # Quy ước direction nên là: "L2M" hoặc "M2L"
+        if direction in ("L2M", "L→M"):
+            arrow = "L→M"
+        elif direction in ("M2L", "M→L"):
+            arrow = "M→L"
+        else:
+            arrow = direction  # fallback
 
-<b>💰 Profit:</b>
-• Chênh lệch: <b>+${spread:,.2f}</b> ({spread_pct:+.4f}%)
-• Với {trade_size} {unit_name}: <b>+${spread * trade_size:,.2f}</b>
+        # =========================
+        # HEADER = DÒNG QUYẾT ĐỊNH
+        # =========================
+        header = (
+            f"{icon} <b>{arrow}</b> | "
+            f"<b>{spread:+.2f} USD</b> ({spread_pct:+.4f}%) | "
+            f"<b>{level}</b>"
+        )
 
-"""
-        
+        # =========================
+        # BODY
+        # =========================
+        body = (
+            f"\n\n"
+            f"Buy  <b>{buy_exchange}</b>: <code>${buy_price:,.2f}</code>\n"
+            f"Sell <b>{sell_exchange}</b>: <code>${sell_price:,.2f}</code>\n\n"
+            f"💰 <b>{trade_size} {unit_name}</b>: "
+            f"<b>{total_profit:+,.2f} USD</b>"
+        )
+
+        message = header + body
+
         success = await self.send_message(message)
         if success:
             self.mark_notified(direction)
-            print(f"\n✅ [Telegram] Đã gửi alert tới {len(self.chat_ids)} người: {direction} (+${spread:,.2f})")
-        
+            print(f"\n✅ [Telegram] Đã gửi alert: {arrow} ({spread:+.2f})")
+
         return success
 
 
@@ -600,14 +644,63 @@ class ArbitrageAnalyzer:
     def __init__(self, lighter_client: LighterWebSocketClient, 
                  mexc_client: MEXCWebSocketClient,
                  telegram_notifier: Optional[TelegramNotifier] = None,
-                 min_spread_usd: float = 10.0):
+                 min_spread_usd: float = 1):
         self.lighter = lighter_client
         self.mexc = mexc_client
         self.telegram = telegram_notifier
         self.min_spread_usd = min_spread_usd  # Chênh lệch tối thiểu để gửi alert
         self.opportunities = deque(maxlen=100)
         self.last_print_time = None
-        
+        self.position_notified = False
+    async def check_position_exit_alert(self, result: Dict, unit_name: str):
+        # 1. Bỏ qua nếu không có Telegram hoặc chưa có data
+        if not IN_POSITION or not self.telegram:
+            return
+
+        if result.get("status") == "waiting":
+            return
+
+        if "opportunities" not in result:
+            return
+
+        if self.position_notified:
+            return
+
+        opps = result["opportunities"]
+        if len(opps) < 2:
+            return
+
+        opp_L2M = opps[0]  # Buy Lighter → Sell MEXC
+        opp_M2L = opps[1]  # Buy MEXC → Sell Lighter
+
+        # 2. Chọn đúng chiều đang giữ
+        if CURRENT_DIRECTION == "L2M":
+            reversal_spread = opp_M2L["profit_per_unit"]
+            reversal_name = opp_M2L["direction"]
+        else:
+            reversal_spread = opp_L2M["profit_per_unit"]
+            reversal_name = opp_L2M["direction"]
+
+        # ⚠️ GẦN ĐẢO CHIỀU
+        if reversal_spread >= REVERSAL_WARN_USD and reversal_spread < 0:
+            await self.telegram.send_message(
+                f"⚠️ <b>SẮP ĐẢO CHIỀU</b>\n\n"
+                f"Chiều ngược: <b>{reversal_name}</b>\n"
+                f"Spread chiều ngược: <b>{reversal_spread:+.2f} USD</b>\n\n"
+                f"📉 Thị trường gần flip!"
+            )
+
+        # 🚨 ĐẢO CHIỀU HOÀN TOÀN
+        if reversal_spread >= REVERSAL_CONFIRM_USD:
+            await self.telegram.send_message(
+                f"🚨 <b>ĐẢO CHIỀU!</b>\n\n"
+                f"Chiều ngược đã có lợi: <b>{reversal_name}</b>\n"
+                f"Spread: <b>{reversal_spread:+.2f} USD</b>\n\n"
+                f"⚠️ Xử lý vị thế ngay!"
+            )
+
+
+
     def analyze(self, trade_size: float = 0.1) -> Dict:
         """
         Phân tích chênh lệch giá và cơ hội hedge
@@ -887,8 +980,13 @@ async def main():
             analyzer.print_analysis(result, compact=True)
             
             # Check và gửi Telegram alert nếu có cơ hội
-            await analyzer.check_and_notify(result, unit_name)
-            
+            # await analyzer.check_and_notify(result, unit_name)
+            # await analyzer.check_position_exit_alert(result, unit_name)
+            if not IN_POSITION:
+                await analyzer.check_and_notify(result, unit_name)
+            else:
+                await analyzer.check_position_exit_alert(result, unit_name)
+
             await asyncio.sleep(UPDATE_INTERVAL)
             
     except KeyboardInterrupt:
@@ -903,5 +1001,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         print("\n👋 Goodbye!")
-
 
