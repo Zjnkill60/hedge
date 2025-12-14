@@ -36,8 +36,8 @@ REVERSAL_WARN_USD = 0
 REVERSAL_CONFIRM_USD = 2.5
 # Telegram Settings
 TELEGRAM_ENABLED = True  # True = bật Telegram, False = tắt
-TELEGRAM_BOT_TOKEN = "8556996913:AAHK_2WqaoAekU9C1zjAxeLnFcp24m0P1ro"  # Nhập Bot Token của bạn
-TELEGRAM_CHAT_IDS = ["1982844680"]   # Nhiều ID ở đây!
+TELEGRAM_BOT_TOKEN = "8410590021:AAEuXtNaXMk7-Su2oO20N_1l4-3KwZ_1H5g"  # Nhập Bot Token của bạn
+TELEGRAM_CHAT_IDS = ["1982844680", "1056814691", "5205147300"]   # Nhiều ID ở đây!
 
 # Alert Settings
 MIN_SPREAD_USD = 500    # Chênh lệch tối thiểu để gửi alert (USD)
@@ -1123,4 +1123,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         print("\n👋 Goodbye!")
+
 
