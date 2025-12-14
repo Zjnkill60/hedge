@@ -36,11 +36,13 @@ REVERSAL_WARN_USD = 0
 REVERSAL_CONFIRM_USD = 2.5
 # Telegram Settings
 TELEGRAM_ENABLED = True  # True = bật Telegram, False = tắt
-TELEGRAM_BOT_TOKEN = "8556996913:AAHK_2WqaoAekU9C1zjAxeLnFcp24m0P1ro"  # Nhập Bot Token của bạn
+TELEGRAM_BOT_TOKEN_WHALE = "8556996913:AAHK_2WqaoAekU9C1zjAxeLnFcp24m0P1ro"  # Nhập Bot Token của bạn
+TELEGRAM_BOT_TOKEN_HEDGE = "8410590021:AAEuXtNaXMk7-Su2oO20N_1l4-3KwZ_1H5g"  # Nhập Bot Token của bạn
+
 TELEGRAM_CHAT_IDS = ["1982844680", "1056814691", "5205147300"]   # Nhiều ID ở đây!
 
 # Alert Settings
-MIN_SPREAD_USD = 500    # Chênh lệch tối thiểu để gửi alert (USD)
+MIN_SPREAD_USD = 5    # Chênh lệch tối thiểu để gửi alert (USD)
 ALERT_COOLDOWN = 10      # Cooldown giữa các alert (giây)
 
 # Trading Settings
@@ -170,8 +172,6 @@ class TelegramNotifier:
             f"\n\n"
             f"Buy  <b>{buy_exchange}</b>: <code>${buy_price:,.2f}</code>\n"
             f"Sell <b>{sell_exchange}</b>: <code>${sell_price:,.2f}</code>\n\n"
-            f"💰 <b>{trade_size} {unit_name}</b>: "
-            f"<b>{total_profit:+,.2f} USD</b>"
         )
 
         message = header + body
@@ -999,36 +999,60 @@ async def main():
     print("=" * 80)
     
     # Load config
-    telegram_notifier = None
+    hedge_notifier = None
+    whale_notifier = None
     
     if TELEGRAM_ENABLED:
-        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_IDS:
-            print("\n⚠️  Telegram enabled nhưng thiếu Bot Token hoặc Chat ID!")
-            print("   → Vui lòng sửa TELEGRAM_BOT_TOKEN và TELEGRAM_CHAT_ID trong code")
+        if not TELEGRAM_BOT_TOKEN_HEDGE or not TELEGRAM_CHAT_IDS:
+            print("\n⚠️  Hedge Telegram enabled nhưng thiếu Bot Token hoặc Chat ID!")
+            print("   → Vui lòng sửa TELEGRAM_BOT_TOKEN_HEDGE và TELEGRAM_CHAT_ID trong code")
             print("   → Hoặc đặt TELEGRAM_ENABLED = False để tắt Telegram\n")
         else:
-            telegram_notifier = TelegramNotifier(
-                TELEGRAM_BOT_TOKEN, 
+            hedge_notifier = TelegramNotifier(
+                TELEGRAM_BOT_TOKEN_HEDGE, 
                 TELEGRAM_CHAT_IDS,
                 cooldown_seconds=ALERT_COOLDOWN
             )
             
-            # Test connection
-            print("\n🔄 Testing Telegram connection...")
-            test_success = await telegram_notifier.send_message(
-                "✅ <b>Arbitrage Bot Started!</b>\n\n"
+            # Test hedge connection
+            print("\n🔄 Testing Hedge Telegram connection...")
+            test_hedge = await hedge_notifier.send_message(
+                "✅ <b>Hedge Arbitrage Bot Started!</b>\n\n"
                 f"Min spread alert: <b>${MIN_SPREAD_USD:,.2f}</b>\n"
                 f"Cooldown: <b>{ALERT_COOLDOWN}s</b>"
+            )
+            
+            if test_hedge:
+                print(f"✅ Hedge Telegram connected! Alert threshold: ${MIN_SPREAD_USD:,.2f}")
+            else:
+                print("❌ Hedge Telegram connection failed! Continuing without hedge alerts...")
+                hedge_notifier = None
+
+        if not TELEGRAM_BOT_TOKEN_WHALE or not TELEGRAM_CHAT_IDS:
+            print("\n⚠️  Whale Telegram enabled nhưng thiếu Bot Token hoặc Chat ID!")
+            print("   → Vui lòng sửa TELEGRAM_BOT_TOKEN_WHALE và TELEGRAM_CHAT_ID trong code")
+            print("   → Hoặc đặt TELEGRAM_ENABLED = False để tắt Telegram\n")
+        else:
+            whale_notifier = TelegramNotifier(
+                TELEGRAM_BOT_TOKEN_WHALE, 
+                TELEGRAM_CHAT_IDS,
+                cooldown_seconds=ALERT_COOLDOWN
+            )
+            
+            # Test whale connection
+            print("\n🔄 Testing Whale Telegram connection...")
+            test_whale = await whale_notifier.send_message(
+                "✅ <b>Whale Alert Bot Started!</b>\n\n"
                 f"Whale detection: <b>Top {WHALE_TOP_LEVELS} levels</b>\n"
                 f"Whale min total: <b>{WHALE_MIN_TOTAL} BTC</b>\n"
                 f"Whale min avg: <b>{WHALE_MIN_AVG} BTC/level</b>"
             )
             
-            if test_success:
-                print(f"✅ Telegram connected! Alert threshold: ${MIN_SPREAD_USD:,.2f}")
+            if test_whale:
+                print("✅ Whale Telegram connected!")
             else:
-                print("❌ Telegram connection failed! Continuing without alerts...")
-                telegram_notifier = None
+                print("❌ Whale Telegram connection failed! Continuing without whale alerts...")
+                whale_notifier = None
     
     # Cấu hình market
     if MARKET_CHOICE.upper() == "ETH":
@@ -1050,7 +1074,7 @@ async def main():
     print(f"   - Update interval: {UPDATE_INTERVAL}s")
     print(f"   - Whale detection: Top {WHALE_TOP_LEVELS} levels")
     print(f"   - Whale threshold: {WHALE_MIN_TOTAL} BTC total, {WHALE_MIN_AVG} BTC avg/level")
-    if telegram_notifier:
+    if hedge_notifier or whale_notifier:
         print(f"   - Telegram: ✅ Enabled (min: ${MIN_SPREAD_USD:,.2f}, cooldown: {ALERT_COOLDOWN}s)")
     else:
         print(f"   - Telegram: ❌ Disabled")
@@ -1072,7 +1096,7 @@ async def main():
     analyzer = ArbitrageAnalyzer(
         lighter_client, 
         mexc_client,
-        telegram_notifier=telegram_notifier,
+        telegram_notifier=hedge_notifier,
         min_spread_usd=MIN_SPREAD_USD
     )
     
@@ -1102,10 +1126,10 @@ async def main():
             # Chỉ kiểm tra whale trên Lighter
             for side in ["bid", "ask"]:
                 whale = whales.get("lighter", {}).get(side)
-                if whale and telegram_notifier:
+                if whale and whale_notifier:
                     whale_id = f"lighter_{side}_{int(whale['best_price'])}_{int(whale['total_qty'])}"
                     if whale_id not in seen_whales:
-                        await telegram_notifier.send_whale_alert(whale)
+                        await whale_notifier.send_whale_alert(whale)
                         seen_whales.add(whale_id)
                         if len(seen_whales) > 100:
                             seen_whales.clear()
@@ -1123,6 +1147,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         print("\n👋 Goodbye!")
-
-
-
