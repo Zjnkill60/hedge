@@ -19,7 +19,7 @@ import requests
 # ============================================================================
 # 📝 CONFIGURATION - SỬA Ở ĐÂY
 # ============================================================================
-IN_POSITION = True   
+IN_POSITION = False   
 
 # Chiều bạn đang vào lệnh
 # "L2M" = Buy Lighter → Sell MEXC
@@ -36,11 +36,11 @@ REVERSAL_WARN_USD = 0
 REVERSAL_CONFIRM_USD = 2.5
 # Telegram Settings
 TELEGRAM_ENABLED = True  # True = bật Telegram, False = tắt
-TELEGRAM_BOT_TOKEN = "8450232987:AAGI84IJjzw5Ea2MomLJdyqgiQSNEriXVi8"  # Nhập Bot Token của bạn
+TELEGRAM_BOT_TOKEN = "8556996913:AAHK_2WqaoAekU9C1zjAxeLnFcp24m0P1ro"  # Nhập Bot Token của bạn
 TELEGRAM_CHAT_IDS = ["1982844680"]   # Nhiều ID ở đây!
 
 # Alert Settings
-MIN_SPREAD_USD = 5    # Chênh lệch tối thiểu để gửi alert (USD)
+MIN_SPREAD_USD = 500    # Chênh lệch tối thiểu để gửi alert (USD)
 ALERT_COOLDOWN = 10      # Cooldown giữa các alert (giây)
 
 # Trading Settings
