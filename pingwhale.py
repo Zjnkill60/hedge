@@ -298,40 +298,37 @@ class OrderBook:
         if not top_levels:
             return None
         
-        # Lấy best_price chính xác và round để tránh float error
-        best_price_str = top_levels[0][0]
-        best_price = round(float(best_price_str), 2)  # Round về 2 decimal như sàn hiển thị
+        best_price = round(float(top_levels[0][0]), 2)
         
         total_qty_btc = 0.0
         whale_levels = []
 
-        # Phân biệt sàn chính xác
         if self.exchange == "MEXC":
-            multiplier = 10000.0  # 1 contract = 0.0001 BTC
-        else:  # Lighter và các sàn khác (quantity đã là BTC)
+            multiplier = 10000.0
+        else:  # Lighter
             multiplier = 1.0
 
         for price_str, qty_str in top_levels:
-            price = round(float(price_str), 2)
             qty_btc = float(qty_str) * multiplier
             total_qty_btc += qty_btc
-            whale_levels.append((price, qty_btc))
+            whale_levels.append((round(float(price_str), 2), qty_btc))
 
-        avg_size_btc = total_qty_btc / len(whale_levels) if whale_levels else 0.0
-        
-        if total_qty_btc >= WHALE_MIN_TOTAL and avg_size_btc >= WHALE_MIN_AVG:
-            last_price = round(float(whale_levels[-1][0]), 2)
+        # ✅ Chỉ dựa vào TOTAL thôi (bỏ avg filter)
+        if total_qty_btc >= WHALE_MIN_TOTAL:
+            last_price = whale_levels[-1][0] if whale_levels else best_price
             price_range = abs(last_price - best_price)
             
+            # Vẫn tính avg để hiển thị trong alert
+            avg_size_btc = total_qty_btc / len(whale_levels) if whale_levels else 0.0
+
             return {
                 "exchange": self.exchange,
                 "side": side,
-                "best_price": best_price,          # Đã round chính xác
-                "total_qty": round(total_qty_btc, 1),  # Hiển thị .1f
-                "levels": whale_levels,
+                "best_price": best_price,
+                "total_qty": round(total_qty_btc, 1),
                 "num_levels": len(whale_levels),
-                "avg_size": round(avg_size_btc, 1),   # .1f
-                "price_range": price_range
+                "avg_size": round(avg_size_btc, 1),
+                "price_range": round(price_range, 2)
             }
 
         return None
@@ -1147,4 +1144,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         print("\n👋 Goodbye!")
+
 
