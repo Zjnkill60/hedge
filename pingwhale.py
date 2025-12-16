@@ -55,7 +55,9 @@ UPDATE_INTERVAL = 0.01   # Tần suất update (giây)
 WHALE_TOP_LEVELS = 10        # Chỉ xét 5 levels đầu tiên
 WHALE_MIN_TOTAL = 50         # Tổng >= 5 BTC
 WHALE_MIN_AVG = 50           # Trung bình mỗi level >= 1 BTC
-WHALE_ALERT_COOLDOWN = 1 
+WHALE_ALERT_COOLDOWN = 1
+MAX_RANGE_USD = 30
+
 # ============================================================================
 
 
@@ -314,12 +316,15 @@ class OrderBook:
             whale_levels.append((round(float(price_str), 2), qty_btc))
 
         # ✅ Chỉ dựa vào TOTAL thôi (bỏ avg filter)
-        if total_qty_btc >= WHALE_MIN_TOTAL:
+        if total_qty_btc >= WHALE_MIN_TOTAL and price_range <= MAX_RANGE_USD:
+            print(f"   ✅ TRUE WHALE! Range ${price_range:.2f} <= ${MAX_RANGE_USD}")
+
             last_price = whale_levels[-1][0] if whale_levels else best_price
             price_range = abs(last_price - best_price)
             
             # Vẫn tính avg để hiển thị trong alert
             avg_size_btc = total_qty_btc / len(whale_levels) if whale_levels else 0.0
+        
 
             return {
                 "exchange": self.exchange,
@@ -330,7 +335,11 @@ class OrderBook:
                 "avg_size": round(avg_size_btc, 1),
                 "price_range": round(price_range, 2)
             }
-
+        else:
+            if price_range > MAX_RANGE_USD:
+                print(f"   ❌ FALSE ALARM! Range ${price_range:.2f} quá rộng → Bỏ qua")
+            elif total_qty_btc < WHALE_MIN_TOTAL:
+                print(f"   ❌ Total thấp {total_qty_btc:.2f} < {WHALE_MIN_TOTAL}")
         return None
 
 class LighterWebSocketClient:
@@ -1144,5 +1153,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         print("\n👋 Goodbye!")
+
 
 
