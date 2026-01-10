@@ -42,8 +42,8 @@ TELEGRAM_BOT_TOKEN_HEDGE = "8410590021:AAEuXtNaXMk7-Su2oO20N_1l4-3KwZ_1H5g"  # N
 TELEGRAM_CHAT_IDS = ["1982844680", "1056814691", "5205147300"]   # Nhiều ID ở đây!
 
 # Alert Settings
-MIN_SPREAD_USD = 25    # Chênh lệch tối thiểu để gửi alert (USD)
-ALERT_COOLDOWN = 5      # Cooldown giữa các alert (giây)
+MIN_SPREAD_USD = 0    # Chênh lệch tối thiểu để gửi alert (USD)
+ALERT_COOLDOWN = 10      # Cooldown giữa các alert (giây)
 
 # Trading Settings
 MARKET_CHOICE = "BTC"    # "BTC" hoặc "ETH"
@@ -1144,6 +1144,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         print("\n👋 Goodbye!")
+
 
 
 
