@@ -36,8 +36,8 @@ REVERSAL_WARN_USD = 0
 REVERSAL_CONFIRM_USD = 2.5
 # Telegram Settings
 TELEGRAM_ENABLED = True  # True = bật Telegram, False = tắt
-TELEGRAM_BOT_TOKEN_WHALE = "8556996913:AAHK_2WqaoAekU9C1zjAxeLnFcp24m0P1ro"  # Nhập Bot Token của bạn
-TELEGRAM_BOT_TOKEN_HEDGE = "8410590021:AAEuXtNaXMk7-Su2oO20N_1l4-3KwZ_1H5g"  # Nhập Bot Token của bạn
+TELEGRAM_BOT_TOKEN_WHALE = "8566133593:AAFKJ9hdiONitRHqWzAz8wCVzgNMfxlPw-A"  # Nhập Bot Token của bạn
+TELEGRAM_BOT_TOKEN_HEDGE = "8113440852:AAEV-mFMHMxMgqIGSoKtZfYaMteTg4mS4X0"  # Nhập Bot Token của bạn
 
 TELEGRAM_CHAT_IDS = ["1982844680", "1056814691", "5205147300"]   # Nhiều ID ở đây!
 
@@ -1144,6 +1144,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         print("\n👋 Goodbye!")
+
 
 
 
