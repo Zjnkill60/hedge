@@ -53,8 +53,8 @@ TRADE_SIZE = 0.5         # Kích thước giao dịch test (0.1 BTC hoặc 1 ETH
 UPDATE_INTERVAL = 0.01   # Tần suất update (giây)
 
 WHALE_TOP_LEVELS = 10        # Chỉ xét 5 levels đầu tiên
-WHALE_MIN_TOTAL = 25       # Tổng >= 5 BTC
-WHALE_MIN_AVG = 25           # Trung bình mỗi level >= 1 BTC
+WHALE_MIN_TOTAL = 45       # Tổng >= 5 BTC
+WHALE_MIN_AVG = 45           # Trung bình mỗi level >= 1 BTC
 WHALE_ALERT_COOLDOWN = 1
 MAX_RANGE_USD = 30
 
