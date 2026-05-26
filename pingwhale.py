@@ -758,7 +758,8 @@ class FundingRateFetcher:
     def format_rate(rate: Optional[float]) -> str:
         if rate is None:
             return "N/A"
-        return f"{rate * 100:+.4f}%"
+        # Hiển thị raw decimal để khớp UI sàn (Lighter hourly, MEXC 8h)
+        return f"{rate:+.4f}"
 
     def format_compact(self) -> str:
         return (f"Fund L:{self.format_rate(self.lighter_rate)} "
@@ -777,28 +778,34 @@ class FundingRateFetcher:
         )
 
     async def _fetch_lighter(self, session: aiohttp.ClientSession):
-        # Endpoint trả về funding rate của TẤT CẢ markets từ NHIỀU sàn
-        # (binance, bybit, hyperliquid, lighter). Cần filter đúng market_id
-        # và exchange="lighter" để lấy funding nội bộ của Lighter.
+        # /funding-rates trả rate đã normalize (lệch ~12.5x so với UI Lighter).
+        # /fundings trả rate hourly khớp UI: rate là magnitude (string), dấu
+        # nằm trong "direction" — direction="long" nghĩa là longs nhận
+        # funding (rate âm), direction="short" nghĩa là shorts nhận (rate dương).
         try:
-            url = "https://mainnet.zklighter.elliot.ai/api/v1/funding-rates"
+            now = int(time.time())
+            start = now - 4 * 3600  # nhìn lại 4h để chắc chắn có entry settled
+            url = (
+                "https://mainnet.zklighter.elliot.ai/api/v1/fundings"
+                f"?market_id={self.lighter_market_index}"
+                f"&start_timestamp={start}&end_timestamp={now}"
+                f"&count_back=5&resolution=1h"
+            )
             timeout = aiohttp.ClientTimeout(total=10)
             async with session.get(url, timeout=timeout) as resp:
                 data = await resp.json(content_type=None)
 
-            rates = data.get("funding_rates", []) if isinstance(data, dict) else []
-            rate = None
-            for item in rates:
-                if (item.get("market_id") == self.lighter_market_index
-                        and str(item.get("exchange", "")).lower() == "lighter"):
-                    rate = item.get("rate")
-                    break
+            fundings = data.get("fundings", []) if isinstance(data, dict) else []
+            if not fundings:
+                print(f"\n[Funding] Lighter: không có entry hourly "
+                      f"market_id={self.lighter_market_index}")
+                return
 
-            if rate is not None:
-                self.lighter_rate = float(rate)
-            else:
-                print(f"\n[Funding] Lighter: không tìm thấy entry "
-                      f"market_id={self.lighter_market_index} exchange=lighter")
+            latest = max(fundings, key=lambda x: int(x.get("timestamp", 0)))
+            magnitude = float(latest.get("rate", 0))
+            direction = str(latest.get("direction", "")).lower()
+            signed_rate = -magnitude if direction == "long" else magnitude
+            self.lighter_rate = signed_rate
         except Exception as e:
             print(f"\n[Funding] Lighter fetch error: {e}")
 
