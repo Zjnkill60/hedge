@@ -58,6 +58,9 @@ WHALE_MIN_AVG = 45           # Trung bình mỗi level >= 1 BTC
 WHALE_ALERT_COOLDOWN = 1
 MAX_RANGE_USD = 30
 
+# Funding rate Settings
+FUNDING_REFRESH_INTERVAL = 300   # giây — fetch funding mỗi 5 phút (đặt 600 = 10 phút)
+
 # ============================================================================
 
 
@@ -735,15 +738,95 @@ class MEXCWebSocketClient:
         if self.ws:
             self.ws.close()
 
+class FundingRateFetcher:
+    """Fetch funding rate BTC từ Lighter và MEXC định kỳ (background asyncio task)."""
+
+    def __init__(self, lighter_market_index: int, mexc_symbol: str,
+                 refresh_interval: int = 300):
+        self.lighter_market_index = lighter_market_index
+        self.mexc_symbol = mexc_symbol
+        self.refresh_interval = refresh_interval
+        self.lighter_rate: Optional[float] = None   # dạng decimal, vd 0.0001 = 0.01%
+        self.mexc_rate: Optional[float] = None
+        self.last_update: Optional[datetime] = None
+        self._task: Optional[asyncio.Task] = None
+
+    @staticmethod
+    def format_rate(rate: Optional[float]) -> str:
+        if rate is None:
+            return "N/A"
+        return f"{rate * 100:+.4f}%"
+
+    def format_compact(self) -> str:
+        return (f"Fund L:{self.format_rate(self.lighter_rate)} "
+                f"M:{self.format_rate(self.mexc_rate)}")
+
+    async def _fetch_lighter(self, session: aiohttp.ClientSession):
+        try:
+            url = ("https://mainnet.zklighter.elliot.ai/api/v1/funding-rates"
+                   f"?market_id={self.lighter_market_index}&limit=1")
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with session.get(url, timeout=timeout) as resp:
+                data = await resp.json(content_type=None)
+
+            rate = None
+            if isinstance(data, dict):
+                if data.get("funding_rates"):
+                    item = data["funding_rates"][0]
+                    rate = item.get("rate") or item.get("funding_rate")
+                elif "rate" in data:
+                    rate = data["rate"]
+                elif "funding_rate" in data:
+                    rate = data["funding_rate"]
+            elif isinstance(data, list) and data:
+                rate = data[0].get("rate") or data[0].get("funding_rate")
+
+            if rate is not None:
+                self.lighter_rate = float(rate)
+        except Exception as e:
+            print(f"\n[Funding] Lighter fetch error: {e}")
+
+    async def _fetch_mexc(self, session: aiohttp.ClientSession):
+        try:
+            url = f"https://contract.mexc.com/api/v1/contract/funding_rate/{self.mexc_symbol}"
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with session.get(url, timeout=timeout) as resp:
+                data = await resp.json(content_type=None)
+
+            if isinstance(data, dict) and data.get("success") and "data" in data:
+                self.mexc_rate = float(data["data"]["fundingRate"])
+        except Exception as e:
+            print(f"\n[Funding] MEXC fetch error: {e}")
+
+    async def _refresh_loop(self):
+        async with aiohttp.ClientSession() as session:
+            while True:
+                await asyncio.gather(
+                    self._fetch_lighter(session),
+                    self._fetch_mexc(session),
+                )
+                self.last_update = datetime.now()
+                print(f"\n[Funding @ {self.last_update.strftime('%H:%M:%S')}] "
+                      f"Lighter: {self.format_rate(self.lighter_rate)} | "
+                      f"MEXC: {self.format_rate(self.mexc_rate)}")
+                await asyncio.sleep(self.refresh_interval)
+
+    def start(self):
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._refresh_loop())
+
+
 class ArbitrageAnalyzer:
     """Phân tích cơ hội arbitrage giữa 2 sàn"""
-    def __init__(self, lighter_client: LighterWebSocketClient, 
+    def __init__(self, lighter_client: LighterWebSocketClient,
                  mexc_client: MEXCWebSocketClient,
                  telegram_notifier: Optional[TelegramNotifier] = None,
-                 min_spread_usd: float = 1):
+                 min_spread_usd: float = 1,
+                 funding_fetcher: Optional['FundingRateFetcher'] = None):
         self.lighter = lighter_client
         self.mexc = mexc_client
         self.telegram = telegram_notifier
+        self.funding = funding_fetcher
         self.min_spread_usd = min_spread_usd  # Chênh lệch tối thiểu để gửi alert
         self.opportunities = deque(maxlen=100)
         self.last_print_time = None
@@ -947,11 +1030,14 @@ class ArbitrageAnalyzer:
                 color2 = "🔴"
                 spread2_str = f"-${abs(spread_mexc_buy_lighter_sell):,.2f}"
             
+            funding_str = f" | {self.funding.format_compact()}" if self.funding else ""
+
             print(f"\r[{datetime.now().strftime('%H:%M:%S.%f')[:-4]}] "
                   f"Lighter: ${lighter['best_ask']:,.2f}↑ ${lighter['best_bid']:,.2f}↓ | "
                   f"MEXC: ${mexc['best_ask']:,.2f}↑ ${mexc['best_bid']:,.2f}↓ | "
                   f"{color1} L→M: {spread1_str} | "
-                  f"{color2} M→L: {spread2_str}",
+                  f"{color2} M→L: {spread2_str}"
+                  f"{funding_str}",
                   end="", flush=True)
         else:
             # In chi tiết đầy đủ
@@ -1093,12 +1179,22 @@ async def main():
     print("⏳ Waiting for orderbook data...")
     await asyncio.sleep(5)
     
+    # Funding rate fetcher (background)
+    funding_fetcher = FundingRateFetcher(
+        lighter_market_index=lighter_market_index,
+        mexc_symbol=mexc_symbol,
+        refresh_interval=FUNDING_REFRESH_INTERVAL,
+    )
+    funding_fetcher.start()
+    print(f"   - Funding refresh: mỗi {FUNDING_REFRESH_INTERVAL}s")
+
     # Khởi tạo analyzer
     analyzer = ArbitrageAnalyzer(
-        lighter_client, 
+        lighter_client,
         mexc_client,
         telegram_notifier=hedge_notifier,
-        min_spread_usd=MIN_SPREAD_USD
+        min_spread_usd=MIN_SPREAD_USD,
+        funding_fetcher=funding_fetcher,
     )
     
     print("\n✅ Bot started! Analyzing arbitrage opportunities...")
