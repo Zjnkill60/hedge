@@ -119,7 +119,8 @@ class TelegramNotifier:
     def mark_notified(self, direction: str):
         self.last_notification_time[direction] = datetime.now()
     
-    async def send_arbitrage_alert(self, opportunity: Dict, trade_size: float, unit_name: str):
+    async def send_arbitrage_alert(self, opportunity: Dict, trade_size: float, unit_name: str,
+                                   funding_text: Optional[str] = None):
         direction = opportunity["direction"]
 
         # Giữ nguyên logic cooldown / notify của bạn
@@ -180,6 +181,8 @@ class TelegramNotifier:
         )
 
         message = header + body
+        if funding_text:
+            message += funding_text + "\n"
 
         success = await self.send_message(message)
         if success:
@@ -761,28 +764,41 @@ class FundingRateFetcher:
         return (f"Fund L:{self.format_rate(self.lighter_rate)} "
                 f"M:{self.format_rate(self.mexc_rate)}")
 
+    def format_telegram(self) -> str:
+        """Block HTML hiển thị funding rate cho Telegram message."""
+        age = ""
+        if self.last_update:
+            age_sec = int((datetime.now() - self.last_update).total_seconds())
+            age = f" <i>({age_sec}s ago)</i>"
+        return (
+            f"💸 <b>Funding</b>{age}\n"
+            f"  Lighter: <code>{self.format_rate(self.lighter_rate)}</code>\n"
+            f"  MEXC: <code>{self.format_rate(self.mexc_rate)}</code>"
+        )
+
     async def _fetch_lighter(self, session: aiohttp.ClientSession):
+        # Endpoint trả về funding rate của TẤT CẢ markets từ NHIỀU sàn
+        # (binance, bybit, hyperliquid, lighter). Cần filter đúng market_id
+        # và exchange="lighter" để lấy funding nội bộ của Lighter.
         try:
-            url = ("https://mainnet.zklighter.elliot.ai/api/v1/funding-rates"
-                   f"?market_id={self.lighter_market_index}&limit=1")
+            url = "https://mainnet.zklighter.elliot.ai/api/v1/funding-rates"
             timeout = aiohttp.ClientTimeout(total=10)
             async with session.get(url, timeout=timeout) as resp:
                 data = await resp.json(content_type=None)
 
+            rates = data.get("funding_rates", []) if isinstance(data, dict) else []
             rate = None
-            if isinstance(data, dict):
-                if data.get("funding_rates"):
-                    item = data["funding_rates"][0]
-                    rate = item.get("rate") or item.get("funding_rate")
-                elif "rate" in data:
-                    rate = data["rate"]
-                elif "funding_rate" in data:
-                    rate = data["funding_rate"]
-            elif isinstance(data, list) and data:
-                rate = data[0].get("rate") or data[0].get("funding_rate")
+            for item in rates:
+                if (item.get("market_id") == self.lighter_market_index
+                        and str(item.get("exchange", "")).lower() == "lighter"):
+                    rate = item.get("rate")
+                    break
 
             if rate is not None:
                 self.lighter_rate = float(rate)
+            else:
+                print(f"\n[Funding] Lighter: không tìm thấy entry "
+                      f"market_id={self.lighter_market_index} exchange=lighter")
         except Exception as e:
             print(f"\n[Funding] Lighter fetch error: {e}")
 
@@ -860,12 +876,15 @@ class ArbitrageAnalyzer:
             reversal_spread = opp_L2M["profit_per_unit"]
             reversal_name = opp_L2M["direction"]
 
+        funding_block = (self.funding.format_telegram() + "\n") if self.funding else ""
+
         # ⚠️ GẦN ĐẢO CHIỀU
         if reversal_spread >= REVERSAL_WARN_USD and reversal_spread < 0:
             await self.telegram.send_message(
                 f"⚠️ <b>SẮP ĐẢO CHIỀU</b>\n\n"
                 f"Chiều ngược: <b>{reversal_name}</b>\n"
                 f"Spread chiều ngược: <b>{reversal_spread:+.2f} USD</b>\n\n"
+                f"{funding_block}"
             )
 
         # 🚨 ĐẢO CHIỀU HOÀN TOÀN
@@ -874,6 +893,7 @@ class ArbitrageAnalyzer:
                 f"🚨 <b>ĐẢO CHIỀU!</b>\n\n"
                 f"Chiều ngược đã có lợi: <b>{reversal_name}</b>\n"
                 f"Spread: <b>{reversal_spread:+.2f} USD</b>\n\n"
+                f"{funding_block}"
             )
 
 
@@ -985,13 +1005,16 @@ class ArbitrageAnalyzer:
         """
         if not self.telegram or result.get("status") == "waiting":
             return
-        
+
+        funding_text = self.funding.format_telegram() if self.funding else None
+
         for opp in result['opportunities']:
             if opp['profit_per_unit'] >= self.min_spread_usd:
                 await self.telegram.send_arbitrage_alert(
-                    opp, 
+                    opp,
                     result['trade_size'],
-                    unit_name
+                    unit_name,
+                    funding_text=funding_text,
                 )
     
     def print_analysis(self, result: Dict, compact: bool = False):
