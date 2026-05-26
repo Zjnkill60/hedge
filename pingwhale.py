@@ -758,8 +758,7 @@ class FundingRateFetcher:
     def format_rate(rate: Optional[float]) -> str:
         if rate is None:
             return "N/A"
-        # Hiển thị raw decimal để khớp UI sàn (Lighter hourly, MEXC 8h)
-        return f"{rate:+.4f}"
+        return f"{rate * 100:+.4f}%"
 
     def format_compact(self) -> str:
         return (f"Fund L:{self.format_rate(self.lighter_rate)} "
@@ -778,34 +777,27 @@ class FundingRateFetcher:
         )
 
     async def _fetch_lighter(self, session: aiohttp.ClientSession):
-        # /funding-rates trả rate đã normalize (lệch ~12.5x so với UI Lighter).
-        # /fundings trả rate hourly khớp UI: rate là magnitude (string), dấu
-        # nằm trong "direction" — direction="long" nghĩa là longs nhận
-        # funding (rate âm), direction="short" nghĩa là shorts nhận (rate dương).
+        # /funding-rates trả rate normalize 8h cross-exchange — chia 8 để
+        # ra hourly khớp UI Lighter. Filter market_id + exchange="lighter".
         try:
-            now = int(time.time())
-            start = now - 4 * 3600  # nhìn lại 4h để chắc chắn có entry settled
-            url = (
-                "https://mainnet.zklighter.elliot.ai/api/v1/fundings"
-                f"?market_id={self.lighter_market_index}"
-                f"&start_timestamp={start}&end_timestamp={now}"
-                f"&count_back=5&resolution=1h"
-            )
+            url = "https://mainnet.zklighter.elliot.ai/api/v1/funding-rates"
             timeout = aiohttp.ClientTimeout(total=10)
             async with session.get(url, timeout=timeout) as resp:
                 data = await resp.json(content_type=None)
 
-            fundings = data.get("fundings", []) if isinstance(data, dict) else []
-            if not fundings:
-                print(f"\n[Funding] Lighter: không có entry hourly "
-                      f"market_id={self.lighter_market_index}")
-                return
+            rates = data.get("funding_rates", []) if isinstance(data, dict) else []
+            rate = None
+            for item in rates:
+                if (item.get("market_id") == self.lighter_market_index
+                        and str(item.get("exchange", "")).lower() == "lighter"):
+                    rate = item.get("rate")
+                    break
 
-            latest = max(fundings, key=lambda x: int(x.get("timestamp", 0)))
-            magnitude = float(latest.get("rate", 0))
-            direction = str(latest.get("direction", "")).lower()
-            signed_rate = -magnitude if direction == "long" else magnitude
-            self.lighter_rate = signed_rate
+            if rate is not None:
+                self.lighter_rate = float(rate) / 8
+            else:
+                print(f"\n[Funding] Lighter: không tìm thấy entry "
+                      f"market_id={self.lighter_market_index} exchange=lighter")
         except Exception as e:
             print(f"\n[Funding] Lighter fetch error: {e}")
 
