@@ -247,15 +247,19 @@ class OrderBook:
     
     def get_best_bid(self) -> Optional[Tuple[float, float]]:
         """Giá mua cao nhất"""
-        if self.bids:
-            return float(self.bids[0][0]), float(self.bids[0][1])
-        return None
-    
+        try:
+            top = self.bids[0]
+            return float(top[0]), float(top[1])
+        except (IndexError, ValueError, TypeError):
+            return None
+
     def get_best_ask(self) -> Optional[Tuple[float, float]]:
         """Giá bán thấp nhất"""
-        if self.asks:
-            return float(self.asks[0][0]), float(self.asks[0][1])
-        return None
+        try:
+            top = self.asks[0]
+            return float(top[0]), float(top[1])
+        except (IndexError, ValueError, TypeError):
+            return None
     
     def calculate_market_impact(self, side: str, size: float) -> Tuple[float, float]:
         """
